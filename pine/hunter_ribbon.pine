@@ -1,0 +1,165 @@
+//@version=6
+// Hunter Ribbon + MTF Gate
+// 8-line MA ribbon (default 7/15/20/25/35/40/50/55), ribbon compression -> expansion
+// signals, fair value gaps, and a non-repainting multi-timeframe trend table.
+// Signals fire on confirmed bars only. HTF values use the [1] + lookahead_on pattern,
+// so they never show data from a higher-TF bar that hasn't closed yet.
+indicator("Hunter Ribbon + MTF Gate", shorttitle = "HuntRib", overlay = true, max_boxes_count = 300, max_labels_count = 200)
+
+// ───────────────────────── Inputs ─────────────────────────
+grpR = "Ribbon"
+maType = input.string("EMA", "MA type", options = ["EMA", "SMA", "WMA", "RMA"], group = grpR)
+src    = input.source(close, "Source", group = grpR)
+len1   = input.int(7,  "MA 1 (fastest)", minval = 1, group = grpR)
+len2   = input.int(15, "MA 2", minval = 1, group = grpR)
+len3   = input.int(20, "MA 3", minval = 1, group = grpR)
+len4   = input.int(25, "MA 4", minval = 1, group = grpR)
+len5   = input.int(35, "MA 5", minval = 1, group = grpR)
+len6   = input.int(40, "MA 6", minval = 1, group = grpR)
+len7   = input.int(50, "MA 7", minval = 1, group = grpR)
+len8   = input.int(55, "MA 8 (slowest)", minval = 1, group = grpR)
+
+grpS = "Signals"
+showSig    = input.bool(true, "Show signals", group = grpS)
+compMult   = input.float(0.6, "Compression: ribbon width < x * ATR", minval = 0.05, step = 0.05, group = grpS)
+compLookbk = input.int(10, "Compression must occur within N bars", minval = 1, group = grpS)
+useHtf     = input.bool(true, "Require HTF trend agreement", group = grpS)
+htfTf      = input.timeframe("60", "HTF filter timeframe", group = grpS)
+useSess    = input.bool(false, "Only signal inside session", group = grpS)
+sess       = input.session("0930-1600", "Session (New York time)", group = grpS)
+
+grpF = "Fair Value Gaps"
+showFvg = input.bool(true, "Show FVGs", group = grpF)
+fvgMin  = input.float(0.25, "Min gap size (x ATR)", minval = 0, step = 0.05, group = grpF)
+fvgMax  = input.int(20, "Max FVGs kept per side", minval = 1, maxval = 140, group = grpF)
+
+grpT = "MTF Table"
+showTbl   = input.bool(true, "Show table", group = grpT)
+trendFast = input.int(20, "Trend fast EMA", minval = 1, group = grpT)
+trendSlow = input.int(50, "Trend slow EMA", minval = 2, group = grpT)
+tf1 = input.timeframe("5",   "TF 1", group = grpT)
+tf2 = input.timeframe("15",  "TF 2", group = grpT)
+tf3 = input.timeframe("60",  "TF 3", group = grpT)
+tf4 = input.timeframe("240", "TF 4", group = grpT)
+tf5 = input.timeframe("D",   "TF 5", group = grpT)
+tf6 = input.timeframe("W",   "TF 6", group = grpT)
+
+// ───────────────────────── Ribbon ─────────────────────────
+f_ma(len) =>
+    e = ta.ema(src, len)
+    s = ta.sma(src, len)
+    w = ta.wma(src, len)
+    r = ta.rma(src, len)
+    maType == "SMA" ? s : maType == "WMA" ? w : maType == "RMA" ? r : e
+
+m1 = f_ma(len1)
+m2 = f_ma(len2)
+m3 = f_ma(len3)
+m4 = f_ma(len4)
+m5 = f_ma(len5)
+m6 = f_ma(len6)
+m7 = f_ma(len7)
+m8 = f_ma(len8)
+
+bullPairs = (m1 > m2 ? 1 : 0) + (m2 > m3 ? 1 : 0) + (m3 > m4 ? 1 : 0) + (m4 > m5 ? 1 : 0) + (m5 > m6 ? 1 : 0) + (m6 > m7 ? 1 : 0) + (m7 > m8 ? 1 : 0)
+bearPairs = (m1 < m2 ? 1 : 0) + (m2 < m3 ? 1 : 0) + (m3 < m4 ? 1 : 0) + (m4 < m5 ? 1 : 0) + (m5 < m6 ? 1 : 0) + (m6 < m7 ? 1 : 0) + (m7 < m8 ? 1 : 0)
+bullStack = bullPairs == 7
+bearStack = bearPairs == 7
+
+atr        = ta.atr(14)
+width      = math.abs(m1 - m8)
+compressed = width < compMult * atr
+recentComp = ta.barssince(compressed) <= compLookbk
+
+ribbonCol = bullStack ? color.new(color.lime, 82) : bearStack ? color.new(color.red, 82) : color.new(color.gray, 90)
+p1 = plot(m1, "MA 1", color = color.new(#00E5FF, 0), linewidth = 1)
+plot(m2, "MA 2", color = color.new(#00BCD4, 15), linewidth = 1)
+plot(m3, "MA 3", color = color.new(#4DD0E1, 25), linewidth = 1)
+plot(m4, "MA 4", color = color.new(#FFEB3B, 20), linewidth = 1)
+plot(m5, "MA 5", color = color.new(#FFC107, 20), linewidth = 1)
+plot(m6, "MA 6", color = color.new(#FF9800, 15), linewidth = 1)
+plot(m7, "MA 7", color = color.new(#FF5722, 10), linewidth = 1)
+p8 = plot(m8, "MA 8", color = color.new(#F44336, 0), linewidth = 2)
+fill(p1, p8, color = ribbonCol, title = "Ribbon fill")
+
+// ───────────────────────── MTF trend (non-repainting) ─────────────────────────
+f_dir() =>
+    ta.ema(close, trendFast) > ta.ema(close, trendSlow) ? 1 : -1
+
+f_trend(tf) =>
+    request.security(syminfo.tickerid, tf, f_dir()[1], lookahead = barmerge.lookahead_on)
+
+t1   = f_trend(tf1)
+t2   = f_trend(tf2)
+t3   = f_trend(tf3)
+t4   = f_trend(tf4)
+t5   = f_trend(tf5)
+t6   = f_trend(tf6)
+tHtf = f_trend(htfTf)
+
+// ───────────────────────── Signals ─────────────────────────
+inSess  = not useSess or not na(time(timeframe.period, sess, "America/New_York"))
+htfBull = not useHtf or tHtf == 1
+htfBear = not useHtf or tHtf == -1
+
+longSig  = bullStack and not bullStack[1] and recentComp and close > m1 and htfBull and inSess
+shortSig = bearStack and not bearStack[1] and recentComp and close < m1 and htfBear and inSess
+
+plotshape(showSig and longSig and barstate.isconfirmed, "Long", shape.labelup, location.belowbar, color.new(color.lime, 0), text = "LONG", textcolor = color.black, size = size.small)
+plotshape(showSig and shortSig and barstate.isconfirmed, "Short", shape.labeldown, location.abovebar, color.new(color.red, 0), text = "SHORT", textcolor = color.white, size = size.small)
+
+alertcondition(longSig and barstate.isconfirmed, "Hunter Long", "Hunter Ribbon LONG on {{ticker}} {{interval}} @ {{close}}")
+alertcondition(shortSig and barstate.isconfirmed, "Hunter Short", "Hunter Ribbon SHORT on {{ticker}} {{interval}} @ {{close}}")
+
+// ───────────────────────── Fair Value Gaps ─────────────────────────
+var array<box> bullFvg = array.new<box>()
+var array<box> bearFvg = array.new<box>()
+
+if showFvg and barstate.isconfirmed
+    // New gaps
+    if low > high[2] and (low - high[2]) >= fvgMin * atr
+        bullFvg.push(box.new(bar_index - 2, low, bar_index, high[2], border_color = color.new(color.teal, 60), bgcolor = color.new(color.teal, 82), extend = extend.right, text = "FVG", text_size = size.tiny, text_color = color.new(color.teal, 20), text_halign = text.align_right))
+        if bullFvg.size() > fvgMax
+            bullFvg.shift().delete()
+    if high < low[2] and (low[2] - high) >= fvgMin * atr
+        bearFvg.push(box.new(bar_index - 2, low[2], bar_index, high, border_color = color.new(color.maroon, 60), bgcolor = color.new(color.red, 82), extend = extend.right, text = "FVG", text_size = size.tiny, text_color = color.new(color.red, 20), text_halign = text.align_right))
+        if bearFvg.size() > fvgMax
+            bearFvg.shift().delete()
+
+    // Remove gaps once price closes through them
+    if bullFvg.size() > 0
+        for i = bullFvg.size() - 1 to 0
+            b = bullFvg.get(i)
+            if close < b.get_bottom()
+                b.delete()
+                bullFvg.remove(i)
+    if bearFvg.size() > 0
+        for i = bearFvg.size() - 1 to 0
+            b = bearFvg.get(i)
+            if close > b.get_top()
+                b.delete()
+                bearFvg.remove(i)
+
+// ───────────────────────── Table ─────────────────────────
+f_cell(tb, row, tf, dir) =>
+    lower = timeframe.in_seconds(tf) < timeframe.in_seconds()
+    txt   = lower or na(dir) ? "—" : dir == 1 ? "Bull" : "Bear"
+    bg    = lower or na(dir) ? color.new(color.gray, 40) : dir == 1 ? color.new(color.green, 10) : color.new(color.red, 10)
+    table.cell(tb, 0, row, tf, text_color = color.white, bgcolor = color.new(#1E3A5F, 0), text_size = size.small)
+    table.cell(tb, 1, row, txt, text_color = color.white, bgcolor = bg, text_size = size.small)
+
+var table tbl = table.new(position.top_right, 2, 8, border_width = 1, border_color = color.new(color.white, 70))
+
+if showTbl and barstate.islast
+    table.cell(tbl, 0, 0, "TF", text_color = color.white, bgcolor = color.new(#0D1B2A, 0), text_size = size.small)
+    table.cell(tbl, 1, 0, "Trend", text_color = color.white, bgcolor = color.new(#0D1B2A, 0), text_size = size.small)
+    f_cell(tbl, 1, tf1, t1)
+    f_cell(tbl, 2, tf2, t2)
+    f_cell(tbl, 3, tf3, t3)
+    f_cell(tbl, 4, tf4, t4)
+    f_cell(tbl, 5, tf5, t5)
+    f_cell(tbl, 6, tf6, t6)
+    stackTxt = bullStack ? "Bull 7/7" : bearStack ? "Bear 7/7" : "Mixed " + str.tostring(math.max(bullPairs, bearPairs)) + "/7"
+    stackBg  = bullStack ? color.new(color.green, 10) : bearStack ? color.new(color.red, 10) : color.new(color.gray, 40)
+    table.cell(tbl, 0, 7, "Ribbon", text_color = color.white, bgcolor = color.new(#1E3A5F, 0), text_size = size.small)
+    table.cell(tbl, 1, 7, stackTxt, text_color = color.white, bgcolor = stackBg, text_size = size.small)

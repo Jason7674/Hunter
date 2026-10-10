@@ -1,0 +1,5 @@
+results/
+__pycache__/
+*.zip
+*.dbn
+*.dbn.zst
