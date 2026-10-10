@@ -1,0 +1,255 @@
+//@version=6
+// Hunter Prop A+ — Midnight Range Sweep & Reclaim
+// One setup, built for prop evaluations: few trades, fixed $ risk, hard daily stops.
+//   1. Build the range from 00:00 to 09:30 NY (includes the 08:30 data spike).
+//      Midnight open and 08:30 open are marked.
+//   2. In the entry window, wait for price to SWEEP beyond the range high/low by a few ticks.
+//   3. Enter only when a strong-bodied candle closes back INSIDE the range within N bars of
+//      the sweep extreme, with volume. Longs below the midnight open, shorts above (optional).
+//   4. Stop goes beyond the sweep extreme. Trade is skipped if the target isn't at least
+//      min R:R away or the stop is too wide for your $ risk.
+//   5. Prop guardrails: max trades/day, done after a win, done after -X R.
+// Every trade is simulated (stop wins ties, flatten at end of management window) and
+// the stats table shows win %, expectancy, drawdown and loss streak in R and $.
+// Confirmed bars only. Use 1-5m charts on ES/NQ/MES/MNQ.
+indicator("Hunter Prop A+", shorttitle = "HuntProp", overlay = true, max_labels_count = 500, max_lines_count = 500)
+
+tz = "America/New_York"
+
+// ───────────────────────── Inputs ─────────────────────────
+grpR = "Range"
+preSess = input.session("0000-0930", "Range build (midnight → RTH open)", group = grpR)
+showLv  = input.bool(true, "Plot range, midnight open, 08:30 open", group = grpR)
+
+grpS = "A+ setup: sweep & reclaim"
+tradeSess   = input.session("0930-1100", "Entry window", group = grpS)
+mgmtSess    = input.session("0930-1200", "Flatten anything open outside", group = grpS)
+sweepTicks  = input.int(4, "Min sweep beyond range (ticks)", minval = 1, group = grpS)
+reclaimBars = input.int(3, "Reclaim within N bars of the sweep extreme", minval = 0, group = grpS)
+dispPct     = input.float(0.5, "Reclaim candle body >= x of its range", minval = 0, maxval = 1, step = 0.05, group = grpS)
+minRvol     = input.float(1.3, "Min relative volume (sweep or reclaim bar)", minval = 0, step = 0.1, group = grpS)
+rvolLen     = input.int(20, "Volume average length", minval = 2, group = grpS)
+pdFilter    = input.bool(true, "Longs only below midnight open, shorts only above", group = grpS)
+tgtMode     = input.string("Range mid", "Target", options = ["Midnight open", "Range mid", "Opposite side", "Fixed R"], group = grpS)
+minRR       = input.float(2.0, "Min reward:risk (skip if target is closer)", minval = 0.5, step = 0.25, group = grpS)
+stopTicks   = input.int(2, "Stop buffer beyond sweep extreme (ticks)", minval = 0, group = grpS)
+
+grpP = "Prop rules"
+riskUsd     = input.float(250, "Risk per trade ($)", minval = 1, group = grpP)
+maxCts      = input.int(10, "Max contracts", minval = 1, group = grpP)
+maxTrades   = input.int(2, "Max trades per day", minval = 1, group = grpP)
+doneOnWin   = input.bool(true, "Done for the day after a win", group = grpP)
+maxDayLossR = input.float(2.0, "Done for the day at -R", minval = 0.5, step = 0.5, group = grpP)
+showSkips   = input.bool(true, "Show skipped setups (gray x, hover for reason)", group = grpP)
+showTbl     = input.bool(true, "Show stats table", group = grpP)
+
+// ───────────────────────── Core ─────────────────────────
+tick   = syminfo.mintick
+pv     = syminfo.pointvalue
+volAvg = ta.sma(volume, rvolLen)
+rvol   = volAvg > 0 ? volume / volAvg : 0.0
+
+inPre    = not na(time(timeframe.period, preSess, tz))
+inEntry  = not na(time(timeframe.period, tradeSess, tz))
+inMgmt   = not na(time(timeframe.period, mgmtSess, tz))
+dayStart = inPre and not inPre[1]
+rangeEnd = not inPre and inPre[1]
+hm       = hour(time, tz) * 60 + minute(time, tz)
+
+fmtR(x) =>
+    (x >= 0 ? "+" : "") + str.tostring(x, "0.00")
+
+// ───────────────────────── Stats (all-time) ─────────────────────────
+var int   stN       = 0
+var int   stW       = 0
+var float stSumR    = 0.0
+var float stPeakR   = 0.0
+var float stMaxDD   = 0.0
+var int   streak    = 0
+var int   maxStreak = 0
+var float netUsd    = 0.0
+var int   days      = 0
+var int   greenDays = 0
+
+// ───────────────────────── Daily state ─────────────────────────
+var float mo         = na
+var float o830       = na
+var bool  got830     = false
+var float bldH       = na
+var float bldL       = na
+var float rH         = na
+var float rL         = na
+var bool  rangeReady = false
+var float swLowPx    = na
+var int   swLowBar   = na
+var float swLowRvol  = 0.0
+var float swHighPx   = na
+var int   swHighBar  = na
+var float swHighRvol = 0.0
+var int   dayTrades  = 0
+var float dayR       = 0.0
+var bool  dayWon     = false
+
+if dayStart
+    if dayTrades > 0
+        days += 1
+        if dayR > 0
+            greenDays += 1
+    mo         := open
+    o830       := na
+    got830     := false
+    bldH       := high
+    bldL       := low
+    rangeReady := false
+    swLowPx    := na
+    swHighPx   := na
+    dayTrades  := 0
+    dayR       := 0.0
+    dayWon     := false
+else if inPre
+    bldH := math.max(bldH, high)
+    bldL := math.min(bldL, low)
+
+if inPre and not got830 and hm >= 510
+    o830   := open
+    got830 := true
+
+if rangeEnd and not na(bldH) and not na(bldL)
+    rH         := bldH
+    rL         := bldL
+    rangeReady := true
+
+rMid = (rH + rL) / 2
+
+// ───────────────────────── Sweep tracking ─────────────────────────
+if rangeReady and inEntry
+    if low < rL - sweepTicks * tick and (na(swLowPx) or low < swLowPx)
+        swLowPx   := low
+        swLowBar  := bar_index
+        swLowRvol := rvol
+    if high > rH + sweepTicks * tick and (na(swHighPx) or high > swHighPx)
+        swHighPx   := high
+        swHighBar  := bar_index
+        swHighRvol := rvol
+
+body = math.abs(close - open)
+rng  = high - low
+disp = rng > 0 and body >= dispPct * rng
+
+longSetup  = rangeReady and inEntry and not na(swLowPx) and bar_index - swLowBar <= reclaimBars and close > rL and close > open and disp and math.max(rvol, swLowRvol) >= minRvol and (not pdFilter or close < mo)
+shortSetup = rangeReady and inEntry and not na(swHighPx) and bar_index - swHighBar <= reclaimBars and close < rH and close < open and disp and math.max(rvol, swHighRvol) >= minRvol and (not pdFilter or close > mo)
+
+// ───────────────────────── Trade simulation (one position at a time) ─────────────────────────
+var int   tDir   = 0
+var float tEntry = na
+var float tStop  = na
+var float tTgt   = na
+var int   tBar   = na
+var int   tCts   = 0
+var line  lnE    = na
+var line  lnS    = na
+var line  lnT    = na
+
+if barstate.isconfirmed and tDir != 0 and bar_index > tBar
+    hitS = tDir == 1 ? low <= tStop : high >= tStop
+    hitT = tDir == 1 ? high >= tTgt : low <= tTgt
+    flat = not inMgmt
+    if hitS or hitT or flat
+        risk   = math.abs(tEntry - tStop)
+        exitPx = hitS ? tStop : hitT ? tTgt : close
+        r      = (exitPx - tEntry) * tDir / risk
+        stN    += 1
+        if r > 0
+            stW    += 1
+            streak := 0
+            dayWon := true
+        else
+            streak    += 1
+            maxStreak := math.max(maxStreak, streak)
+        stSumR  += r
+        stPeakR := math.max(stPeakR, stSumR)
+        stMaxDD := math.max(stMaxDD, stPeakR - stSumR)
+        netUsd  += (exitPx - tEntry) * tDir * pv * tCts
+        dayR    += r
+        for ln in array.from(lnE, lnS, lnT)
+            line.set_x2(ln, bar_index)
+            line.set_extend(ln, extend.none)
+        label.new(bar_index, exitPx, fmtR(r) + "R", style = label.style_label_left, color = color(na), textcolor = r > 0 ? color.lime : color.red, size = size.small)
+        tDir := 0
+
+dayDone = dayTrades >= maxTrades or (doneOnWin and dayWon) or dayR <= -maxDayLossR
+
+f_target(int dir, float entry, float risk) =>
+    tgtMode == "Midnight open" ? mo : tgtMode == "Range mid" ? rMid : tgtMode == "Opposite side" ? (dir == 1 ? rH : rL) : entry + dir * minRR * risk
+
+if barstate.isconfirmed and longSetup != shortSetup
+    dir  = longSetup ? 1 : -1
+    swPx = longSetup ? swLowPx : swHighPx
+    stop = swPx - dir * stopTicks * tick
+    risk = (close - stop) * dir
+    tgt  = f_target(dir, close, risk)
+    rrv  = risk > 0 ? (tgt - close) * dir / risk : na
+    cts  = risk > 0 ? math.min(maxCts, math.floor(riskUsd / (risk * pv))) : 0
+    reason = tDir != 0 ? "already in a trade" : dayDone ? "done for the day (prop rules)" : risk <= 0 ? "invalid stop" : na(rrv) or rrv < minRR - 1e-9 ? "R:R " + str.tostring(rrv, "0.0") + " < " + str.tostring(minRR, "0.0#") : cts < 1 ? "stop too wide for $" + str.tostring(riskUsd, "0") + " risk" : ""
+    if reason == ""
+        tDir   := dir
+        tEntry := close
+        tStop  := stop
+        tTgt   := tgt
+        tBar   := bar_index
+        tCts   := cts
+        dayTrades += 1
+        lnE := line.new(bar_index, close, bar_index + 1, close, extend = extend.right, color = color.new(color.white, 20), width = 1)
+        lnS := line.new(bar_index, stop, bar_index + 1, stop, extend = extend.right, color = color.new(color.red, 0), width = 1, style = line.style_dashed)
+        lnT := line.new(bar_index, tgt, bar_index + 1, tgt, extend = extend.right, color = color.new(color.lime, 0), width = 1, style = line.style_dashed)
+        tip = (dir == 1 ? "A+ BUY" : "A+ SELL") + " @ " + str.tostring(close, format.mintick) +
+             "\nSwept range " + (dir == 1 ? "low " + str.tostring(rL, format.mintick) : "high " + str.tostring(rH, format.mintick)) + ", extreme " + str.tostring(swPx, format.mintick) +
+             "\nStop " + str.tostring(stop, format.mintick) + "  Target " + str.tostring(tgt, format.mintick) + " (" + tgtMode + ")" +
+             "\nR:R " + str.tostring(rrv, "0.0") + "   Size " + str.tostring(cts) + " ct   Risk $" + str.tostring(risk * pv * cts, "0") +
+             "\nTrade " + str.tostring(dayTrades) + "/" + str.tostring(maxTrades) + " today"
+        label.new(bar_index, dir == 1 ? low : high, (dir == 1 ? "A+ BUY " : "A+ SELL ") + str.tostring(cts) + "ct", style = dir == 1 ? label.style_label_up : label.style_label_down, color = dir == 1 ? color.new(#00C853, 0) : color.new(#D50000, 0), textcolor = color.white, size = size.small, tooltip = tip)
+        alert(syminfo.ticker + " " + tip, alert.freq_once_per_bar_close)
+    else if showSkips
+        label.new(bar_index, dir == 1 ? low : high, "x", style = label.style_none, textcolor = color.gray, size = size.small, tooltip = "Skipped " + (dir == 1 ? "long" : "short") + ": " + reason)
+    if longSetup
+        swLowPx := na
+    else
+        swHighPx := na
+
+// ───────────────────────── Plots ─────────────────────────
+f_br(x) =>
+    x != x[1] ? na : x
+
+moP  = f_br(mo)
+o8P  = f_br(o830)
+rHP  = f_br(rangeReady ? rH : na)
+rLP  = f_br(rangeReady ? rL : na)
+rMP  = f_br(rangeReady ? rMid : na)
+
+plot(showLv ? moP : na, "Midnight open", color = color.new(color.white, 0), linewidth = 2, style = plot.style_steplinebr)
+plot(showLv ? o8P : na, "08:30 open", color = color.new(color.orange, 0), linewidth = 1, style = plot.style_steplinebr)
+plot(showLv ? rHP : na, "Range high", color = color.new(color.red, 0), linewidth = 2, style = plot.style_steplinebr)
+plot(showLv ? rLP : na, "Range low", color = color.new(color.green, 0), linewidth = 2, style = plot.style_steplinebr)
+plot(showLv ? rMP : na, "Range mid", color = color.new(color.gray, 30), linewidth = 1, style = plot.style_steplinebr)
+bgcolor(inEntry ? color.new(color.blue, 94) : na, title = "Entry window")
+
+// ───────────────────────── Stats table ─────────────────────────
+var table st = table.new(position.bottom_right, 2, 10, border_width = 1, border_color = color.new(color.white, 70))
+
+f_row(int row, string k, string v, color bg) =>
+    table.cell(st, 0, row, k, text_color = color.white, bgcolor = color.new(#1E3A5F, 0), text_size = size.small, text_halign = text.align_left)
+    table.cell(st, 1, row, v, text_color = color.white, bgcolor = bg, text_size = size.small)
+
+if showTbl and barstate.islast
+    neutral = color.new(#0D1B2A, 0)
+    expR = stN > 0 ? stSumR / stN : 0.0
+    f_row(0, "Trades", str.tostring(stN), neutral)
+    f_row(1, "Win %", stN > 0 ? str.tostring(100.0 * stW / stN, "0") : "—", neutral)
+    f_row(2, "Expectancy", stN > 0 ? fmtR(expR) + "R" : "—", stN == 0 ? neutral : expR > 0 ? color.new(color.green, 30) : color.new(color.red, 30))
+    f_row(3, "Net R", fmtR(stSumR), neutral)
+    f_row(4, "Max drawdown", "-" + str.tostring(stMaxDD, "0.00") + "R", neutral)
+    f_row(5, "Max loss streak", str.tostring(maxStreak), neutral)
+    f_row(6, "Net $ (no fees)", str.tostring(netUsd, "#,##0"), netUsd >= 0 ? color.new(color.green, 30) : color.new(color.red, 30))
+    f_row(7, "Green days", days > 0 ? str.tostring(greenDays) + "/" + str.tostring(days) : "—", neutral)
+    f_row(8, "Today", str.tostring(dayTrades) + "/" + str.tostring(maxTrades) + " trades, " + fmtR(dayR) + "R", neutral)
+    f_row(9, "Status", tDir != 0 ? "IN TRADE" : dayDone ? "DONE TODAY" : "HUNTING", tDir != 0 ? color.new(color.blue, 30) : dayDone ? color.new(color.gray, 30) : color.new(color.green, 30))

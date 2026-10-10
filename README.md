@@ -12,3 +12,8 @@ My AI
   (engulf/hammer/star) + relative volume, filtered by time window and quarter of the hour.
   Candles colored by relative volume. Every signal is tracked to target/stop/timeout, and the
   win % on each signal uses only earlier signals (side × quarter-hour). Hover a label for details.
+- `hunter_prop_a_plus.pine` — prop-eval model, one setup only: midnight→09:30 range (midnight
+  open + 08:30 open marked), sweep beyond range + strong-body reclaim with volume, longs below
+  midnight open / shorts above. Skips trades under min R:R or too wide for $ risk. Prop guardrails
+  (max trades/day, done after win, done at -R) and stats: win %, expectancy, max DD, loss streak,
+  net $, green days.
