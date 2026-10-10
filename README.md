@@ -17,3 +17,21 @@ My AI
   midnight open / shorts above. Skips trades under min R:R or too wide for $ risk. Prop guardrails
   (max trades/day, done after win, done at -R) and stats: win %, expectancy, max DD, loss streak,
   net $, green days.
+
+## Backtester (`backtest/`)
+
+Python backtest of the Prop A+ model on Databento data (ES/NQ, any schema: `ohlcv-1m`, `ohlcv-1s`,
+`trades`; DBN or CSV; zipped or not). Raw multi-contract data is reduced to the highest-volume
+outright per trading day. Fills are stricter than TradingView: slippage on entry/stop/flatten,
+targets need a trade-through, commissions included.
+
+```bash
+pip install -r backtest/requirements.txt
+cd backtest
+python prop_a_plus.py --data /path/to/es_zips --contract MES --risk 250 --compare-targets
+python -m pytest -q
+```
+
+Prints stats overall, in-sample (< `--split`, default 2024-01-01) and out-of-sample, by year,
+plus a prop-eval simulation (eval started on every day; profit target, EOD trailing max loss
+that locks at the starting balance, day limit). Trades go to `results/`.

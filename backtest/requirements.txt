@@ -1,0 +1,5 @@
+pandas>=2.2
+numpy>=1.26
+databento>=0.40
+zstandard>=0.22
+pytest>=8
